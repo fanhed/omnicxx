@@ -39,3 +39,4 @@ nosetests.xml
 .svn
 tags
 *.vltags
+.idea
