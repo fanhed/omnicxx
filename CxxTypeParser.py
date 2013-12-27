@@ -18,6 +18,10 @@ from CppTokenizer import CxxToken
 from ListReader import ListReader
 from CppTokenizer import CxxTokenize
 
+class TokensReader(ListReader):
+    def __init__(self, tokens, null = CxxToken()):
+        ListReader.__init__(self, tokens, null)
+
 class CxxUnitType(object):
     '''单元类型, 如:
     A a;
@@ -516,7 +520,7 @@ def unit_test_int():
     ]
 
     for origin, result in cases:
-        tokrdr = ListReader(CxxTokenize(origin), CxxToken())
+        tokrdr = TokensReader(CxxTokenize(origin))
         try:
             tmp = CxxParseUnitType_Int(tokrdr)
             assert tmp == result
@@ -528,7 +532,7 @@ def unit_test_int():
         except AssertionError:
             print 'tokrdr is not null:', origin
 
-        tokrdr = ListReader(CxxTokenize(origin), CxxToken())
+        tokrdr = TokensReader(CxxTokenize(origin))
         unit_type = CxxParseUnitType(tokrdr)
         assert unit_type.text == result
         assert not unit_type.tmpl
@@ -545,12 +549,12 @@ def unit_test_char():
 
     for origin in cases:
         result = origin
-        tokrdr = ListReader(CxxTokenize(origin), CxxToken())
+        tokrdr = TokensReader(CxxTokenize(origin))
         tmp = CxxParseUnitType_Char(tokrdr)
         assert tmp == result
         assert tokrdr.IsNull()
 
-        tokrdr = ListReader(CxxTokenize(origin), CxxToken())
+        tokrdr = TokensReader(CxxTokenize(origin))
         unit_type = CxxParseUnitType(tokrdr)
         assert unit_type.text == result
         assert not unit_type.tmpl
@@ -564,7 +568,7 @@ def unit_test_float():
 
     for origin in cases:
         result = origin
-        tokrdr = ListReader(CxxTokenize(origin), CxxToken())
+        tokrdr = TokensReader(CxxTokenize(origin))
         tmp = CxxParseUnitType_Float(tokrdr)
         assert tmp == result
         try:
@@ -572,7 +576,7 @@ def unit_test_float():
         except AssertionError:
             print 'AssertionError:', origin
 
-        tokrdr = ListReader(CxxTokenize(origin), CxxToken())
+        tokrdr = TokensReader(CxxTokenize(origin))
         unit_type = CxxParseUnitType(tokrdr)
         assert unit_type.text == result
         assert not unit_type.tmpl
@@ -585,7 +589,7 @@ def unit_test_unittype():
     ]
 
     for origin, result, end in cases:
-        tokrdr = ListReader(CxxTokenize(origin), CxxToken())
+        tokrdr = TokensReader(CxxTokenize(origin))
         unit_type = CxxParseUnitType(tokrdr)
         #print unit_type
         try:
@@ -631,7 +635,7 @@ def unit_test_type():
 
     for idx, origin in enumerate(cases):
         result = results[idx]
-        tokrdr = ListReader(CxxTokenize(origin), CxxToken())
+        tokrdr = TokensReader(CxxTokenize(origin))
         cxx_type = CxxParseType(tokrdr)
         #print '=' * 40
         #print origin
