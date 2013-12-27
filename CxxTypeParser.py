@@ -81,7 +81,7 @@ class CxxType(object):
 
 def SkipToToken(tokrdr, text, collector = None):
     '''跳到指定的token, 成功时, tokrdr.curr 即为指定的 token'''
-    while tokrdr.curr:
+    while tokrdr.curr.IsValid():
         tok = tokrdr.curr
 
         if isinstance(collector, list):
@@ -330,7 +330,7 @@ def CxxParseUnitType(tokrdr):
             nestlv = 1
             text = ''
             __first_enter = True
-            while tokrdr.curr:
+            while tokrdr.curr.IsValid():
                 if not __first_enter:
                     tokrdr.Pop()
                 __first_enter = False
@@ -373,6 +373,54 @@ def CxxParseUnitType(tokrdr):
     # endif
 
     return unit_type
+
+def CxxParseTemplateList(tokrdr):
+    '''解析模板列表, 解析时需要包括两端的尖括号
+        <A, B<C>, D>
+    '''
+    result = []
+    if tokrdr.curr.text != '<':
+        return []
+
+    tokrdr.Pop()
+
+    nestlv = 1
+    text = ''
+    __first_enter = True
+    while tokrdr.curr.IsValid():
+        if not __first_enter:
+            tokrdr.Pop()
+        __first_enter = False
+
+        if tokrdr.curr.text == '<':
+            nestlv += 1
+        elif tokrdr.curr.text == '>':
+            nestlv -= 1
+            if nestlv == 0:
+                result.append(text)
+                # 完毕
+                tokrdr.Pop()
+                break
+        elif tokrdr.curr.text == ',':
+            if nestlv == 1:
+                result.append(text)
+                text = ''
+                continue
+
+        # 收集字符
+        if nestlv >= 1:
+            if text:
+                text += ' ' + tokrdr.curr.text
+            else:
+                text += tokrdr.curr.text
+    # endwhile
+
+    if nestlv != 0:
+        # FIXME: 这里语法错误并且把所有字符吃掉了, 理论上需要恢复,
+        #        这里直接返回错误算了
+        return []
+
+    return result
 
 def CxxParseType(tokrdr):
     cxx_type = CxxType()
