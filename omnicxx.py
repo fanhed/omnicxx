@@ -29,56 +29,11 @@ from CppTokenizer import CPP_EOF, CPP_KEYOWORD, CPP_WORD, C_COMMENT,        \
         C_UNFIN_COMMENT, CPP_COMMENT, CPP_STRING, CPP_CHAR, CPP_DIGIT,      \
         CPP_OPERATORPUNCTUATOR as CPP_OP
 
-class ListReader(object):
-    def __init__(self, tokens, null = None):
-        # 原料, 反转顺序是为了性能?
-        self.__list = tokens[::-1]
-        # 已经被弹出去的 token，用于支持 Prev()
-        self.__popeds = []
-        # 无效标识
-        self.null = None
-
-    @property
-    def current(self):
-        return self.Cur()
-
-    def Get(self):
-        '''弹出一个token'''
-        if not self.__list:
-            self.__popeds.append(self.null)
-            return self.null
-        self.__popeds.append(self.__list[-1])
-        return self.__list.pop(-1)
-
-    def Pop(self):
-        '''别名'''
-        return self.Get()
-
-    def Put(self, tok):
-        '''压入一个token'''
-        self.__list.append(tok)
-        # 这个也要处理, 等于改变了一个
-        if self.__popeds:
-            self.__popeds.pop(-1)
-
-    def Cur(self):
-        '''当前token'''
-        if self.__list:
-            return self.__list[-1]
-        return self.null
-
-    def Next(self):
-        if len(self.__list) >= 2:
-            return self.__list[-2]
-        return self.null
-
-    def Prev(self):
-        if len(self.__popeds) >= 1:
-            return self.__popeds[-1]
-        return self.null
-
-    def Is(self, tok):
-        return self.Cur() is tok
+from ListReader import ListReader
+from CxxTypeParser import TokensReader
+from CxxTypeParser import CxxType
+from CxxTypeParser import CxxUnitType
+from CxxTypeParser import CxxParseType
 
 class ComplScope(object):
     '''
@@ -90,9 +45,9 @@ class ComplScope(object):
     {
         'kind': <'container'|'variable'|'function'|'unknown'>
         'name': <name>    <- 必然是单元类型 eg. A<a,b,c>
-        'tmpl' : <template initialization list>
+        'tmpl': <template initialization list>
         'tag' : {}        <- 在解析的时候添加
-        'typeinfo': {}    <- 在解析的时候添加
+        'type': {}        <- 在解析的时候添加
         'cast': <强制类型转换>
     }
     '''
@@ -104,19 +59,27 @@ class ComplScope(object):
     def __init__(self):
         self.name = ''
         self.kind = KIND_UNKNOWN
+        # 每个item是文本
         self.tmpl = []
-        self.typeinfo = None
+        # CxxType
+        self.type = None
+        # CxxType
+        self.cast = None
 
 class ComplInfo(object):
     def __init__(self):
+        # ComplScope
         self.scopes = []
         # this | <global> | {precast type}
         #self.cast = ''
 
+    def Invalidate(self):
+        del self.scopes[:]
+
 # 跳至指定的匹配，tokrdr 当前的 token 为 left 的下一个
 def SkipToMatch(tokrdr, left, right, collector = None):
     nestlv = 1
-    while tokrdr.current:
+    while tokrdr.curr:
         tok = tokrdr.Get()
 
         if isinstance(collector, list):
@@ -129,36 +92,6 @@ def SkipToMatch(tokrdr, left, right, collector = None):
 
         if nestlv == 0:
             break
-
-class CxxUnitType(object):
-    '''单元类型, 如:
-    A a;
-    A<B, <C<D> > a;
-
-    像 A::B::C 就是由三个单元类型构成
-    '''
-    def __init__(self):
-        # 文本
-        self.text = ''
-        # 模板
-        self.tmpl = []
-
-    def IsValid(self):
-        return bool(self.text)
-
-    def IsError(self):
-        return not self.IsValid()
-
-class CxxType(object):
-    '''代表一个C++类型，保存足够的信息'''
-    def __init__(self):
-        # CxxUnitType 实例的列表
-        self.typelist = []
-        # 是否强制为全局作用域，如 ::A::B
-        self._global = False
-
-    def IsValid(self):
-        return bool(self.typelist)
 
 class TypeInfo(object):
     '''代表一个C++类型，保存足够的信息, vim omnicpp 兼容形式'''
@@ -187,16 +120,15 @@ def ParseTypeInfo(tokrdr):
 def GetCompleteInfo(tokens):
     # 需要语法解析, 实在是太麻烦了
     '''
-" 获取全能补全请求前的语句的 OmniScopeStack
-" 以下情况一律先清理所有不必要的括号, 清理 [], 把 C++ 的 cast 转为 C 形式
+" 获取全能补全请求前的语句的 ComplInfo
 " case01. A::B C::D::|
-" case02. A::B()->C().|    orig: A::B::C(" a(\")z ", '(').|
+" case02. A::B()->C().|
 " case03. A::B().C->|
 " case04. A->B().|
 " case05. A->B.|
 " case06. Z Y = ((A*)B)->C.|
 " case07. (A*)B()->C.|
-" case08. static_cast<A*>(B)->C.|      -> 处理成标准 C 的形式 ((A*)B)->C.|
+" case08. static_cast<A*>(B)->C.|
 " case09. A(B.C()->|)
 "
 " case10. ::A->|
@@ -237,9 +169,9 @@ def GetCompleteInfo(tokens):
 " 1 的方法, 需要记住整条路径每个作用域的 tmpl
 " 2 的方法, OmniInfo 增加 tmpl 域
     '''
-    rdr = ListReader(tokens[::-1])
-    while rdr.current:
-        print rdr.Get()
+    rdr = TokensReader(tokens[::-1])
+    while rdr.curr:
+        print rdr.Pop()
 
     # 初始状态, 可能不用
     STATE_INIT = 0
@@ -256,17 +188,13 @@ def GetCompleteInfo(tokens):
 
     # 用于模拟 C 语言的 for(; x; y) 语句
     __first_enter = True
-    while True:
+    while rdr.curr.IsValid():
         if not __first_enter:
             # 消耗一个token
-            rdr.Get()
+            rdr.Pop()
         __first_enter = False
 
-        if not rdr.current:
-            break
-
-        tok = rdr.current
-        if tok.kind == CPP_OP and CXX_MEMBER_OP_RE.match(tok.text):
+        if rdr.curr.kind == CPP_OP and CXX_MEMBER_OP_RE.match(rdr.curr.text):
         # 这是个成员操作符 '->', '.', '::'
             if state == STATE_INIT:
                 # 初始状态遇到操作符, 补全开始, 光标前没有输入单词
@@ -275,14 +203,14 @@ def GetCompleteInfo(tokens):
                 state = STATE_EXPECT_WORD
             elif state == STATE_EXPECT_WORD:
                 # 语法错误
-                print 'Syntax Error:', tok.text
+                print 'Syntax Error:', rdr.curr.text
                 result = ComplInfo()
                 break
             else:
                 pass
             # endif
 
-        elif tok.kind == CPP_WORD:
+        elif rdr.curr.kind == CPP_WORD:
             if state == STATE_INIT:
                 # 这是base, 这里不考虑base的问题, 继续
                 pass
@@ -294,7 +222,7 @@ def GetCompleteInfo(tokens):
             elif state == STATE_EXPECT_WORD:
                 # 成功获取一个单词
                 compl_scope = ComplScope()
-                compl_scope.name = tok.text
+                compl_scope.name = rdr.curr.text
                 prev_tok = rdr.Prev()
                 if prev_tok:
                     if prev_tok.text == '::':
@@ -315,7 +243,7 @@ def GetCompleteInfo(tokens):
                 pass
 
 
-        elif tok.kind == CPP_KEYOWORD and tok.text == 'this':
+        elif rdr.curr.kind == CPP_KEYOWORD and rdr.curr.text == 'this':
             # TODO: 未想好如何处理
             if state == STATE_INIT:
                 # 直接
@@ -338,7 +266,7 @@ def GetCompleteInfo(tokens):
                 pass
             # endif
 
-        elif tok.kind == CPP_OP and tok.text == ')':
+        elif rdr.curr.kind == CPP_OP and rdr.curr.text == ')':
             if state == STATE_INIT:
                 pass
             elif state == STATE_EXPECT_OP:
@@ -365,43 +293,141 @@ def GetCompleteInfo(tokens):
                 #     ^|
                 #
                 # function:
-                #   func(0).|
-                #         ^|
+                #   func<T>(0).|
+                #            ^|
                 # 
-                rdr.Get()
+                rdr.Pop()
                 colltoks = []
                 SkipToMatch(rdr, ')', '(', colltoks)
-                tmprdr = ListReader(colltoks[::-1])
-                if rdr.current and rdr.current.kind == CPP_WORD:
+                # tmprdr 是正常顺序
+                tmprdr = TokensReader(colltoks[::-1])
+
+                '''
+                C++形式的cast:
+                    dynamic_cast < type-id > ( expression )
+                    static_cast < type-id > ( expression )
+                    reinterpret_cast < type-id > ( expression )
+                    const_cast < type-id > ( expression )
+                '''
+
+                # 处理模板
+                #   Func<T>(0)
+                #         ^
+                tmpltoks = []
+                if rdr.curr.text == '>':
+                    tmpltoks.append(rdr.Pop())
+                    SkipToMatch(rdr, '>', '<', tmpltoks)
+
+                if rdr.curr.kind == CPP_WORD:
                     # 确定是函数
-                    # TODO: Func<T>(0)
-                    #             ^
                     compl_scope = ComplScope()
                     compl_scope.kind = ComplScope.KIND_FUNCTION
                     compl_scope.name = rdr.Next().text
                     result.scopes.insert(0, compl_scope)
                     state = STATE_EXPECT_OP
-                elif tmprdr.current and tmprdr.current.text == '(':
+                elif rdr.curr.kind == CPP_KEYOWORD and \
+                        rdr.curr.text == 'dynamic_cast' or \
+                        rdr.curr.text == 'static_cast' or \
+                        rdr.curr.text == 'reinterpret_cast' or \
+                        rdr.curr.text == 'const_cast':
+                    # C++ 形式的 precast
+                    if not tmpltoks:
+                        # 语法错误
+                        result.Invalidate()
+                        break
+                    compl_scope = ComplScope()
+                    compl_scope.kind = ComplScope.KIND_VARIABLE
+                    compl_scope.name = '<CODE>'
+                    # 解析的时候不要前后的尖括号
+                    tmpltoks_reader = TokensReader(tmpltoks[1:-1:-1])
+                    cxx_type = CxxParseType(tmpltoks_reader)
+                    result.scopes.insert(0, compl_scope)
+                elif tmprdr.curr.text == '(':
                     # C 形式的 precast
                     compl_scope = ComplScope()
                     compl_scope.kind = ComplScope.KIND_VARIABLE
-                    compl_scope.text = '<CODE>' # 无需名字
-                    result.scopes.insert(0, compl_scope)
+                    compl_scope.name = '<CODE>' # 无需名字
 
                     # 既然是 precast 那么这里可以直接获取结果并结束
-                    tmprdr.Get()
+                    tmprdr.Pop()
                     colltoks = []
                     SkipToMatch(tmprdr, '(', ')', colltoks)
                     # 不要最后的 ')'
                     if colltoks:
                         colltoks.pop(-1)
                     # 这里就可以解析类型了
-                    # TODO
+                    cxx_type = CxxParseType(TokensReader(colltoks))
+                    # cxx_type 可能是无效的, 由外部检查
+                    compl_scope.cast = cxx_type
+                    result.scopes.insert(0, compl_scope)
+                elif rdr.prev.kind == CPP_OP and rdr.prev.text == '::':
+                    # postcast
+                    # eg. (A**)::B.|
+                    #         |^^
+                    if result.scopes:
+                        compl_scope = result.scopes[0]
+                    else:
+                        compl_scope = ComplScope()
+                    if not compl_scope.type:
+                        # 这种情况下, compl_scope 肯定可以分析处理type的, 
+                        # 如果没有那肯定是语法错误
+                        result.Invalidate()
+                        break
+                    compl_scope.type._global = True
+                else:
+                    # 到这里应该是语法错误
+                    result.Invalidate()
+                    break
             else:
                 pass
 
+        elif rdr.curr.kind == CPP_OP and rdr.curr.text == ']':
+            # 处理数组下标
+            # eg. A[B][C[D]].|
+            # 暂不支持数组下标补全, 现在全忽略掉 
+            if state == STATE_INIT:
+                break
+            elif state == STATE_EXPECT_OP:
+                result.Invalidate()
+                break
+            elif state == STATE_EXPECT_WORD:
+                rdr.Pop()
+                SkipToMatch(rdr, ']', '[')
+            else:
+                result.Invalidate()
+                break
+            # endif
+
+        elif rdr.curr.kind == CPP_OP and rdr.curr.text == '>':
+            # 处理模板实例化
+            # eg. A<B, C>::|
+            if state == STATE_INIT:
+                break
+            elif state == STATE_EXPECT_OP:
+                result.Invalidate()
+                break
+            elif state == STATE_EXPECT_WORD:
+                # 跳到匹配的 '<'
+                tmpltoks = []
+                SkipToMatch(rdr, '>', '<', tmpltoks)
+                # TODO: 分析模板
+            else:
+                result.Invalidate()
+                break
+            # endif
+
         else:
-            pass
+            # 遇到了其他字符, 结束. 前面判断的结果多数情况下是有用
+            if rdr.prev.kind == CPP_OP and rdr.prev.text == '::':
+                # 期待单词时遇到其他字符, 并且之前的是 '::', 那么这是 <global>
+                if state == STATE_EXPECT_WORD:
+                    if not result.scopes:
+                        result.scopes.append(ComplInfo())
+                    # TODO
+                    result.scopes[0].
+
+            if rdr.curr.kind == CPP_KEYOWORD and rdr.curr.text == 'new':
+                result.new_stmt = True
 
         # endif
 
@@ -575,9 +601,8 @@ def main(argv):
     arg2: file
     arg3: row
     arg4: col
-    arg5: base
     '''
-    if len(argv) < 6:
+    if len(argv) < 5:
         usage(argv[0])
         return 1
 
@@ -588,7 +613,7 @@ def main(argv):
     file = argv[2]
     row = int(argv[3])
     col = int(argv[4])
-    base = argv[5]
+    #base = argv[5]
     with open(file) as f:
         buff = f.read().splitlines()
 
