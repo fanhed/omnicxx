@@ -43,7 +43,7 @@ class ComplScope(object):
 
     {
         'kind': <'container'|'variable'|'function'|'unknown'>
-        'name': <name>    <- 必然是单元类型 eg. A<a,b,c>
+        'text': <name>    <- 必然是单元类型 eg. A<a,b,c>
         'tmpl': <template initialization list>
         'tag' : {}        <- 在解析的时候添加
         'type': {}        <- 在解析的时候添加
@@ -63,7 +63,7 @@ class ComplScope(object):
     }
 
     def __init__(self, name = '', kind = KIND_UNKNOWN):
-        self.name = ''
+        self.text = ''
         self.kind = type(self).KIND_UNKNOWN
         # 每个item是文本
         self.tmpl = []
@@ -73,17 +73,14 @@ class ComplScope(object):
         self.cast = None
 
     def __repr__(self):
-        return '{"name": "%s", "kind": "%s", "tmpl": %s, "type": %s, "cast": %s}' % (
-            self.name, type(self).kind_mapping.get(self.kind),
+        return '{"text": "%s", "kind": "%s", "tmpl": %s, "type": %s, "cast": %s}' % (
+            self.text, type(self).kind_mapping.get(self.kind),
             self.tmpl, self.type, self.cast)
 
 class ComplInfo(object):
     def __init__(self):
         # ComplScope
         self.scopes = []
-        # this | <global> | {precast type}
-        # 这个值来源于 scopes 里面的 type, 用于方便获取
-        self.cast = None
         # 如果最前面的有效 token 为 '::', 那么这个成员为 True
         # 最前面的 '::' 不算进 scopes 里面的类型里面, 
         # 单独算进这个变量处理起来更简单
@@ -95,8 +92,8 @@ class ComplInfo(object):
         del self.scopes[:]
 
     def __repr__(self):
-        return '{"cast": %s, "new_stmt": %s, "global": %s, "scopes": %s}' % (
-            self.cast, self.new_stmt, self._global, self.scopes)
+        return '{"global": %s, "new_stmt": %s, "scopes": %s}' % (
+            self._global, self.new_stmt, self.scopes)
 
 # 跳至指定的匹配，tokrdr 当前的 token 为 left 的下一个
 # 返回结束时的嵌套层数, 调用着可检查此返回值来确定是否下一步动作
@@ -121,7 +118,7 @@ def SkipToMatch(tokrdr, left, right, collector = None):
 class TypeInfo(object):
     '''代表一个C++类型，保存足够的信息, vim omnicpp 兼容形式'''
     def __init__(self):
-        self.name = ''
+        self.text = ''
         self.tmpl = []
         self.typelist = []
 
@@ -145,54 +142,20 @@ def ParseTypeInfo(tokrdr):
 def GetComplInfo(tokens):
     # 需要语法解析, 实在是太麻烦了
     '''
-" 获取全能补全请求前的语句的 ComplInfo
-" case01. A::B C::D::|
-" case02. A::B()->C().|
-" case03. A::B().C->|
-" case04. A->B().|
-" case05. A->B.|
-" case06. Z Y = ((A*)B)->C.|
-" case07. (A*)B()->C.|
-" case08. static_cast<A*>(B)->C.|
-" case09. A(B.C()->|)
-"
-" case10. ::A->|
-" case11. A(::B.|)
-" case12. (A**)::B.|
-"
-" Return: OmniInfo
-" OmniInfo
-" {
-" 'omniss': <OmniSS>
-" 'precast': <this|<global>|precast>
-" }
-"
-" 列表 OmniSS, 每个条目为 OmniScope
-" 'tmpl' 一般在 'kind' 为 'container' 时才有效
-" OmniScope
-" {
-" 'kind': <'container'|'variable'|'function'|'cast'|'unknown'>
-" 'name': <name>    <- 必然是单元类型 eg. A<a,b,c>
-" 'tmpl' : <template initialization list>
-" 'tag' : {}        <- 在解析的时候添加
-" 'typeinfo': {}    <- 在解析的时候添加
-" }
-"
-" 如 case3, [{'kind': 'container', 'name': 'A'},
-"            {'kind': 'function', 'name': 'B'},
-"            {'kind': 'variable', 'name': 'C'}]
-" 如 case6, [{'kind': 'variable', 'name': 'B'},
-"            {'kind': 'variable', 'name': 'C'}]
-"
-" 判断 cast 的开始: 1. )单词, 2. )(
-" 判断 precast: 从 )( 匹配的结束位置寻找匹配的 ), 如果匹配的 ')' 右边也为 ')'
-" 判断 postcast: 从 )( 匹配的结束位置寻找匹配的 ), 如果匹配的 ')' 右边不为 ')'
-" TODO: 
-" 1. A<B>::C<D, E>::F g; g.|
-" 2. A<B>::C<D, E>::F.g.| (g 为静态变量)
-"
-" 1 的方法, 需要记住整条路径每个作用域的 tmpl
-" 2 的方法, OmniInfo 增加 tmpl 域
+    获取全能补全请求前的语句的 ComplInfo
+        case01. A::B C::D::|
+        case02. A::B()->C().|
+        case03. A::B().C->|
+        case04. A->B().|
+        case05. A->B.|
+        case06. Z Y = ((A*)B)->C.|
+        case07. (A*)B()->C.|
+        case08. static_cast<A*>(B)->C.|
+        case09. A(B.C()->|)
+
+        case10. ::A->|
+        case11. A(::B.|)
+        case12. (A**)::B.|
     '''
     rdr = TokensReader(tokens[::-1])
     #while rdr.curr.IsValid():
@@ -228,8 +191,7 @@ def GetComplInfo(tokens):
                 state = STATE_EXPECT_WORD
             elif state == STATE_EXPECT_WORD:
                 # 语法错误
-                print 'Syntax Error:', rdr.curr.text
-                result = ComplInfo()
+                result.Invalidate()
                 break
             else:
                 pass
@@ -248,22 +210,17 @@ def GetComplInfo(tokens):
             elif state == STATE_EXPECT_WORD:
                 # 成功获取一个单词
                 compl_scope = ComplScope()
-                compl_scope.name = rdr.curr.text
-                # 先根据上一个字符来判断: next -> left
-                if rdr.next.text == '::':
+                compl_scope.text = rdr.curr.text
+                # 无法根据上一个字符来判断类型, 因为 ::A 的 A 可能是变量
+                # 根据下一个字符来判断: prev -> right
+                if rdr.prev.text == '::':
                     compl_scope.kind = ComplScope.KIND_CONTAINER
-                elif rdr.next.text == '->' or rdr.next.text == '.':
+                elif rdr.prev.text == '->' or rdr.prev.text == '.' \
+                        or rdr.prev.text == '[':
                     compl_scope.kind = ComplScope.KIND_VARIABLE
                 else:
-                    # 再根据下一个字符来判断: prev -> right
-                    if rdr.prev.text == '::':
-                        compl_scope.kind = ComplScope.KIND_CONTAINER
-                    elif rdr.prev.text == '->' or rdr.prev.text == '.' \
-                            or rdr.prev.text == '[':
-                        compl_scope.kind = ComplScope.KIND_VARIABLE
-                    else:
-                        # unknown
-                        pass
+                    # unknown
+                    pass
 
                 result.scopes.insert(0, compl_scope)
                 state = STATE_EXPECT_OP
@@ -287,7 +244,7 @@ def GetComplInfo(tokens):
                     #break
                 # 特殊变量 'this'
                 compl_scope = ComplScope()
-                compl_scope.name = 'this'
+                compl_scope.text = 'this'
                 compl_scope.kind = type(compl_scope).KIND_VARIABLE
                 result.scopes.insert(0, compl_scope)
                 break
@@ -361,7 +318,9 @@ def GetComplInfo(tokens):
                 tmpltoks = []
                 if rdr.curr.text == '>':
                     tmpltoks.append(rdr.Pop())
-                    SkipToMatch(rdr, '>', '<', tmpltoks)
+                    if SkipToMatch(rdr, '>', '<', tmpltoks) != 0:
+                        result.Invalidate()
+                        break
                     # 需要反转
                     tmpltoks.reverse()
 
@@ -369,7 +328,7 @@ def GetComplInfo(tokens):
                     # 确定是函数
                     compl_scope = ComplScope()
                     compl_scope.kind = ComplScope.KIND_FUNCTION
-                    compl_scope.name = rdr.curr.text
+                    compl_scope.text = rdr.curr.text
                     if tmpltoks:
                         compl_scope.tmpl = CxxParseTemplateList(TokensReader(tmpltoks))
                     result.scopes.insert(0, compl_scope)
@@ -386,10 +345,10 @@ def GetComplInfo(tokens):
                         break
                     compl_scope = ComplScope()
                     compl_scope.kind = ComplScope.KIND_VARIABLE
-                    compl_scope.name = '<CODE>'
+                    compl_scope.text = '<CODE>'
                     # 解析的时候不要前后的尖括号
                     tmpltoks = tmpltoks[1:-1]
-                    tmpltoks_reader = TokensReader(tmpltoks[::-1])
+                    tmpltoks_reader = TokensReader(tmpltoks)
                     cxx_type = CxxParseType(tmpltoks_reader)
                     compl_scope.cast = cxx_type
                     result.scopes.insert(0, compl_scope)
@@ -400,7 +359,7 @@ def GetComplInfo(tokens):
                     #           ^|
                     compl_scope = ComplScope()
                     compl_scope.kind = ComplScope.KIND_VARIABLE
-                    compl_scope.name = '<CODE>' # 无需名字
+                    compl_scope.text = '<CODE>' # 无需名字
 
                     # 既然是 precast 那么这里可以直接获取结果并结束
                     tmprdr.Pop()
@@ -429,6 +388,7 @@ def GetComplInfo(tokens):
                         result.Invalidate()
                         break
                     compl_scope.type._global = True
+                    break
                 else:
                     #  (A**)::B.
                     # ^
@@ -506,12 +466,13 @@ def GetComplInfo(tokens):
                     result.Invalidate()
                     break
                 compl_scope = ComplScope()
-                compl_scope.name = rdr.curr.text
+                compl_scope.text = rdr.curr.text
                 compl_scope.tmpl = tmpl
                 # 上面已经检查过了, 这里可用于调试
                 if right.text == '::':
-                    compl_scope.kind == ComplScope.KIND_CONTAINER
+                    compl_scope.kind = ComplScope.KIND_CONTAINER
                 result.scopes.insert(0, compl_scope)
+                state = STATE_EXPECT_OP
             else:
                 result.Invalidate()
                 break
@@ -568,7 +529,7 @@ def Error(msg):
 def unit_test_GetComplInfo():
     cases = [
         # test
-        "A[B][C[D]].",
+        #"dynamic_cast<A<Z, Y, X> *>(B.b())->C.",
 
         # general
         "A::B C::D::",
@@ -593,7 +554,7 @@ def unit_test_GetComplInfo():
         # precast
         "((A*)B.b)->C.",
         "((A*)B.b())->C.",
-        "static_cast<A *>(B.b())->C.",
+        "dynamic_cast<A<Z, Y, X> *>(B.b())->C.",
 
         # 数组
         "A[B][C[D]].",
@@ -605,7 +566,10 @@ def unit_test_GetComplInfo():
         "if (a > ::A.",
 
         # this
-        "if ( this->a."
+        "if ( this->a.",
+
+        # new
+        "A::B *pa = new A::",
     ]
     
     for origin in cases:
