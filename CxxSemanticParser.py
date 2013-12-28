@@ -62,7 +62,7 @@ class ComplScope(object):
         KIND_UNKNOWN    : 'KIND_UNKNOWN',
     }
 
-    def __init__(self):
+    def __init__(self, name = '', kind = KIND_UNKNOWN):
         self.name = ''
         self.kind = type(self).KIND_UNKNOWN
         # 每个item是文本
@@ -99,6 +99,7 @@ class ComplInfo(object):
             self.cast, self.new_stmt, self._global, self.scopes)
 
 # 跳至指定的匹配，tokrdr 当前的 token 为 left 的下一个
+# 返回结束时的嵌套层数, 调用着可检查此返回值来确定是否下一步动作
 def SkipToMatch(tokrdr, left, right, collector = None):
     nestlv = 1
     while tokrdr.curr.IsValid():
@@ -114,6 +115,8 @@ def SkipToMatch(tokrdr, left, right, collector = None):
 
         if nestlv == 0:
             break
+
+    return nestlv
 
 class TypeInfo(object):
     '''代表一个C++类型，保存足够的信息, vim omnicpp 兼容形式'''
@@ -246,16 +249,17 @@ def GetComplInfo(tokens):
                 # 成功获取一个单词
                 compl_scope = ComplScope()
                 compl_scope.name = rdr.curr.text
-                # 先根据上一个字符来判断
+                # 先根据上一个字符来判断: next -> left
                 if rdr.next.text == '::':
                     compl_scope.kind = ComplScope.KIND_CONTAINER
                 elif rdr.next.text == '->' or rdr.next.text == '.':
                     compl_scope.kind = ComplScope.KIND_VARIABLE
                 else:
-                    # 再根据下一个字符来判断
+                    # 再根据下一个字符来判断: prev -> right
                     if rdr.prev.text == '::':
                         compl_scope.kind = ComplScope.KIND_CONTAINER
-                    elif rdr.prev.text == '->' or rdr.prev.text == '.':
+                    elif rdr.prev.text == '->' or rdr.prev.text == '.' \
+                            or rdr.prev.text == '[':
                         compl_scope.kind = ComplScope.KIND_VARIABLE
                     else:
                         # unknown
@@ -267,29 +271,39 @@ def GetComplInfo(tokens):
                 # 忽略
                 pass
 
-
         elif rdr.curr.kind == CPP_KEYOWORD and rdr.curr.text == 'this':
-            # TODO: 未想好如何处理
             if state == STATE_INIT:
                 # 这是base, 忽略
-                pass
+                state = STATE_EXPECT_OP
             elif state == STATE_EXPECT_OP:
-                pass
+                # 期待操作符, 即上一个是单词, 显然语法错误
+                result.Invalidate()
+                break
             elif state == STATE_EXPECT_WORD:
-                pass
+                # 期待单词遇到 this, 肯定是 this-> 之类的
+                right = rdr.prev
+                #if right.text != '->': # 现在是不做指针或者结构的区别的
+                    #result.Invalidate()
+                    #break
+                # 特殊变量 'this'
+                compl_scope = ComplScope()
+                compl_scope.name = 'this'
+                compl_scope.kind = type(compl_scope).KIND_VARIABLE
+                result.scopes.insert(0, compl_scope)
+                break
             else:
                 pass
             # endif
 
-            if state == STATE_INIT:
-                pass
-            elif state == STATE_EXPECT_OP:
-                pass
-            elif state == STATE_EXPECT_WORD:
-                pass
-            else:
-                pass
-            # endif
+            #if state == STATE_INIT:
+            #    pass
+            #elif state == STATE_EXPECT_OP:
+            #    pass
+            #elif state == STATE_EXPECT_WORD:
+            #    pass
+            #else:
+            #    pass
+            ## endif
 
         elif rdr.curr.kind == CPP_OP and rdr.curr.text == ')':
             if state == STATE_INIT:
@@ -438,8 +452,21 @@ def GetComplInfo(tokens):
                 result.Invalidate()
                 break
             elif state == STATE_EXPECT_WORD:
-                rdr.Pop()
-                SkipToMatch(rdr, ']', '[')
+                # 跳过所有连续的 [][][]
+                brk = False
+                while rdr.curr.kind == CPP_OP and rdr.curr.text == ']':
+                    rdr.Pop()
+                    if SkipToMatch(rdr, ']', '[') != 0:
+                        # 中括号不匹配, 肯定语法错误吧
+                        result.Invalidate()
+                        brk = True
+                        break
+                if brk:
+                    break
+                # NOTE: 当前指向下一个token, 如果这时候continue的话, 这个token
+                #       将错误检查, 因为每次循环后固定获取下一个token, 所以要
+                #       put一个token
+                rdr.Put(rdr.prev)
             else:
                 result.Invalidate()
                 break
@@ -452,21 +479,48 @@ def GetComplInfo(tokens):
                 result.Invalidate()
                 break
             elif state == STATE_EXPECT_OP:
-                result.Invalidate()
+                # eg. if (1 > A.|)
                 break
             elif state == STATE_EXPECT_WORD:
+                # eg. A<B, C>::
+                #           ^
+                # eg. if (a > ::A.
+                #           ^
                 # 跳到匹配的 '<'
-                tmpltoks = []
-                SkipToMatch(rdr, '>', '<', tmpltoks)
-                # TODO: 分析模板
+                right = rdr.prev
+                tmpltoks = [rdr.Pop()]
+                if SkipToMatch(rdr, '>', '<', tmpltoks) != 0:
+                    # eg. if (a > ::A.
+                    if right.text == '::':
+                        result._global = True
+                    break
+                tmpltoks.reverse()
+                # 分析模板
+                tmpl = CxxParseTemplateList(TokensReader(tmpltoks))
+                # 继续往前分析, 因为现在的状况基本是已确定的(?)
+                # 前面必须是一个函数或者容器
+                if not rdr.curr.kind == CPP_WORD and \
+                   not rdr.curr.kind == CPP_KEYOWORD and \
+                   right.text != '::': # 无此语法: A<B>.
+                    # 貌似必然是语法错误, 因为没见过这种语法: {op}<>
+                    result.Invalidate()
+                    break
+                compl_scope = ComplScope()
+                compl_scope.name = rdr.curr.text
+                compl_scope.tmpl = tmpl
+                # 上面已经检查过了, 这里可用于调试
+                if right.text == '::':
+                    compl_scope.kind == ComplScope.KIND_CONTAINER
+                result.scopes.insert(0, compl_scope)
             else:
                 result.Invalidate()
                 break
             # endif
 
         else:
-            # 遇到了其他字符, 结束. 前面判断的结果多数情况下是有用
-            if rdr.prev.kind == CPP_OP and rdr.prev.text == '::':
+        # 遇到了其他字符, 结束. 前面判断的结果多数情况下是有用
+            right = rdr.prev
+            if right.kind == CPP_OP and right.text == '::':
                 # 期待单词时遇到其他字符, 并且之前的是 '::', 那么这是 <global>
                 if state == STATE_EXPECT_WORD:
                     result._global = True
@@ -513,6 +567,10 @@ def Error(msg):
 
 def unit_test_GetComplInfo():
     cases = [
+        # test
+        "A[B][C[D]].",
+
+        # general
         "A::B C::D::",
         "A::B()->C().",
         "A::B().C->",
@@ -525,6 +583,8 @@ def unit_test_GetComplInfo():
         "(A**)::B.",
         "B<X,Y>(Z)->",
         "A<B>::C<D, E>::F.g.",
+        "A(B.C()->",
+        "A(::B.C()->",
 
         # global
         "::A->",
@@ -540,6 +600,12 @@ def unit_test_GetComplInfo():
 
         # 模板实例化
         "A<B, C>::",
+
+        # 终结
+        "if (a > ::A.",
+
+        # this
+        "if ( this->a."
     ]
     
     for origin in cases:
@@ -547,6 +613,7 @@ def unit_test_GetComplInfo():
         #print tokens
         print '=' * 40
         print origin
+        #print tokens
         compl_info = GetComplInfo(tokens)
         print compl_info
         #print json.dumps(eval(repr(compl_info)), sort_keys=True, indent=4)
