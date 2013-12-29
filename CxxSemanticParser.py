@@ -88,8 +88,13 @@ class ComplInfo(object):
         # "new A::B", 用于标识, 有时候需要根据这个来获取calltips
         self.new_stmt = False
 
+    def IsValid(self):
+        return bool(self.scopes) or self._global
+
     def Invalidate(self):
         del self.scopes[:]
+        self._global = False
+        self.new_stmt = False
 
     def __repr__(self):
         return '{"global": %s, "new_stmt": %s, "scopes": %s}' % (
@@ -121,23 +126,6 @@ class TypeInfo(object):
         self.text = ''
         self.tmpl = []
         self.typelist = []
-
-def ParseTypeInfo(tokrdr):
-    '''
-    从一条语句中获取变量信息, 无法判断是否非法声明
-    尽量使传进来的参数是单个语句而不是多个语句
-    Return: 若解释失败，返回无有效内容的 TypeInfo
-    eg1. const MyClass&
-    eg2. const map < int, int >&
-    eg3. MyNs::MyClass
-    eg4. ::MyClass**
-    eg5. MyClass a, *b = NULL, c[1] = {};
-    eg6. A<B>::C::D<E<Z>, F>::G g;
-    eg7. hello(MyClass1 a, MyClass2* b
-    eg8. Label: A a;
-    TODO: eg9. A (*a)[10];
-    '''
-    pass
 
 def GetComplInfo(tokens):
     # 需要语法解析, 实在是太麻烦了
@@ -523,6 +511,510 @@ class ScopeInfo(object):
         print 'container: %s' % self.container
         print 'global: %s' % self._global
 
+class CxxScope(object):
+    '''ExpandScopeStack() 返回用, 合并的 CppScope'''
+    def __init__(self):
+        self.kind = 'unknown'
+        self.name = ''
+        self.scopes = []
+
+def CookScopeStack(tagmgr, scope_stack):
+    '''处理 scope, 展开里面所有的必要项, 然后需要的时候直接提取'''
+    # TODO
+    pass
+
+def ExpandScopeStack(tagmgr, scope_stack):
+    '''
+    scope_stack 始终是很有用的原始信息, 只有在有需要的时候按需提取信息即可
+
+    分析 scope_stack 中的名空间信息
+    * 自动添加默认的 '<global>' 搜索域
+    * 自动添加类和其所有基类的路径作为搜索域
+
+    * 要展开 typedef
+    * 要展开 inherits
+
+    @return:    展开后的数段搜索域
+
+    ['file', 'container', 'container', 'function', 'function', 'container']
+    ->
+    [
+        {'kind': 'file',       'scopes': [...]},
+        {'kind': 'container',  'scopes': [...]},
+        {'kind': 'function',   'scopes': [...]},
+        {'kind': 'container',  'scopes': [...]},
+    ]
+    '''
+    # 名空间别名: {'abc': 'std'}
+    nsalias = {}
+    # using 声明: {'cout': 'std::out', 'cin': 'std::cin'}
+    usingdecl = {}
+    # using namespace
+    usingns = []
+
+    result = []
+
+    # 逆序
+    srdr = ListReader(scope_stack[::-1])
+    while srdr.curr:
+        nsalias.update(srdr.curr.nsinfo.nsalias)
+        usingdecl.update(srdr.curr.nsinfo.using)
+        usingns.extend(srdr.curr.nsinfo.usingns)
+
+        if srdr.curr.kind == 'file':
+            cxx_scope = CxxScope()
+            cxx_scope.kind = 'file'
+            cxx_scope.scopes.extend(srdr.curr.nsinfo.usingns)
+            cxx_scope.scopes.append('<global>')
+            result.append(cxx_scope)
+            # 理论上必定完成
+            break
+        elif srdr.curr.kind == 'container':
+            pending_scopes = []
+            # 处理连续的 container
+            tmp_search_scopes = []
+            while srdr.curr:
+                tmp_search_scopes.extend(srdr.curr.nsinfo.usingns)
+                pending_scopes.append(srdr.curr.name)
+                srdr.Pop()
+            # 顺序
+            for idx, scope in enumerate(pending_scopes[::-1]):
+                # 处理嵌套类
+                # eg.
+                # void A::B::C::D()
+                # {
+                #     |
+                # }
+                # ['A', 'B', 'C'] -> ['A', 'A::B', 'A::B::C']
+                # ['A', 'A::B', 'A::B::C'] 中的每个元素也必须展开其基类
+                cls = '::'.join(pending_scopes[: idx+1])
+                # TODO: 需要展开每个类的基类作为需要搜索的作用域
+                epdcls = [cls]
+
+                # 添加到最前面
+                tmp_search_scopes[:0] = epdcls
+            # endfor
+            cxx_scope = CxxScope()
+            cxx_scope.kind = 'container'
+            cxx_scope.scopes.extend(tmp_search_scopes)
+            result.append(cxx_scope)
+            # 自己处理的, 直接 continue
+            continue
+        elif srdr.curr.kind == 'function':
+            cxx_scope = CxxScope()
+            # 处理连续的 function
+            while srdr.curr:
+                cxx_scope.scopes.extend(srdr.curr.nsinfo.usingns)
+                srdr.Pop()
+            cxx_scope.kind = 'function'
+            result.append(cxx_scope)
+            # 自己处理的, 直接 continue
+            continue
+        else:
+            pass
+        # endif
+
+        srdr.Pop()
+    # endwhile
+
+    return result
+
+def ResolveScopeStack(scope_stack):
+    '''
+    分析 scope_stack 中的名空间信息, 并作为搜索域来进行归类
+    * 自动添加默认的 '<global>' 搜索域
+    * 自动添加类和其所有基类的路径作为搜索域
+    '''
+    result = ScopeInfo()
+
+    # 名空间别名: {'abc': 'std'}
+    nsalias = {}
+    # using 声明: {'cout': 'std::out', 'cin': 'std::cin'}
+    usingdecl = {}
+    # using namespace
+    usingns = []
+
+    # 需要返回的搜索作用域
+    global_scopes = []
+
+    # 容器类型的 scope
+    container_scopes = []
+
+    # 需要进一步解析的 scope
+    pending_scopes = []
+
+    function_scopes = []
+
+    # NOTE: 这里作了一个重要的假设
+    # scope_stack 的元素的顺序必然是如此的
+    #   ['file', 'container', 'container', ..., 'function']
+    #   ['file', 'container', 'container', ...]
+    # 即必然以 'file' 开始, 并且之后的是连续的 'container', 最后可能是 'function'
+    # 并且假定 'function' 不能嵌套
+    # TODO: 需要支持任何顺序的情况('file'开始无法改变)
+
+    for scope in scope_stack:
+        # NOTE: 原来的逻辑是在 else 分支不进行此操作, 一般来说如果传入参数
+        #       正确的话, 不存在任何问题
+        nsalias.update(scope.nsinfo.nsalias)
+        usingdecl.update(scope.nsinfo.using)
+        usingns.extend(scope.nsinfo.usingns)
+
+        if scope.kind == 'file':
+            global_scopes.extend(scope.nsinfo.usingns)
+            # 把 <global> 放最后，虽然理论上当有名字二义性的时候是编译错误
+            # 但是在模糊模式里面，要把全局搜索域放到最后
+            global_scopes.append('<global>')
+        elif scope.kind == 'container':
+            pending_scopes.append(scope.name)
+            container_scopes.extend(scope.nsinfo.usingns)
+        elif scope.kind == 'function':
+            function_scopes.extend(scope.nsinfo.usingns)
+        elif scope.kind == 'other':
+            # TODO: 添加到更合适的地方
+            function_scopes.extend(scope.nsinfo.usingns)
+        else:
+            pass
+        # endif
+
+    # endfor
+
+    for idx, scope in enumerate(pending_scopes):
+        # 处理嵌套类
+        # eg.
+        # void A::B::C::D()
+        # {
+        #     |
+        # }
+        # ['A', 'B', 'C'] -> ['A', 'A::B', 'A::B::C']
+        # ['A', 'A::B', 'A::B::C'] 中的每个元素也必须展开其基类
+        cls = '::'.join(pending_scopes[: idx+1])
+        # TODO: 需要展开每个类的基类作为需要搜索的作用域
+        epdcls = [cls]
+
+        # 添加到最前面, 原来的逻辑
+        container_scopes[:0] = epdcls
+    # endfor
+
+    result.function = function_scopes
+    result.container = container_scopes
+    result._global = global_scopes
+
+    return result
+
+def ExpandUsingAndNSAlias(text):
+    ''''''
+    # TODO
+    return text
+
+def FilterDuplicate(li):
+    s = set()
+    result = []
+    for item in li:
+        if item in s:
+            continue
+        s.add(item)
+        result.append(item)
+    return result
+
+def _ToCxxType(di):
+    '''libCxxParser.so 导出的 type 转为 CxxType 实例'''
+    '''
+    "pPrvtData": {
+        "line": 4, 
+        "type": {
+            "types": [
+                {
+                    "name": "CxxLexPrvtData", 
+                    "til": []
+                }
+            ]
+        }
+    }
+    '''
+    cxx_type = CxxType()
+    for t in di.get('type').get('types'):
+        unit_type = CxxUnitType()
+        unit_type.text = t['name']
+        unit_type.tmpl = t['til']
+        cxx_type.typelist.append(unit_type)
+    # TODO: _global 成员貌似没法初始化, 因为 libCxxParser.so 没有导出它
+    return cxx_type
+
+def ResolveLocalDecl(scope_stack, variable_name):
+    for scope in scope_stack[::-1]:
+        if scope.vars.has_key(variable_name):
+            return _ToCxxType(scope.vars.get(variable_name))
+    return None
+
+def ResolveFirstVariable(tagmgr, scope_stack, search_scopes, variable_name):
+    '''解析第一个变量
+    search_scopes 应该从 scope_stack 中提取'''
+    cxx_type = ResolveLocalDecl(scope_stack, variable_name)
+    if cxx_type:
+        # TODO: 展开 using 和名空间别名
+        return cxx_type
+
+    # 没有在局部作用域到找到此变量的声明
+    # 在作用域栈中搜索
+    tag = GetFirstMatchTag(tagmgr, search_scopes, variable_name)
+    # TODO: 从 tag 中获取变量声明, 然后解析出 CxxType
+    cxx_type = CxxParseType(tag.get('text', ''))
+    if tag.has_key('class'):
+        # 变量是类中的成员, 需要解析模版
+        # TODO
+        pass
+    return cxx_type
+
+def GetBotLevelSearchScopesFromTag(tag, cxx_type = CxxType()):
+    '''
+    解析 tag 的 typeref 和 inherits, 从而获取底层搜索域
+    可选参数为 TypeInfo, 作为输出, 会修改, 用于类型为模版类的情形
+    Return: 与 tag.path 同作用域的 scope 列表
+    NOTE1: dTag 和 可选参数都可能修改而作为输出
+    NOTE2: 仅解析出最邻近的搜索域, 不展开次邻近等的搜索域, 主要作为搜索成员用
+    NOTE3: 仅需修改派生类的类型信息作为输出,
+           因为基类的类型定义会在模版解析(ResolveTemplate())的时候处理,
+           模版解析时仅需要派生类的标签和类型信息
+    '''
+    return _GetBotLevelSearchScopesFromTag(tag, cxx_type)
+
+def _GetBotLevelSearchScopesFromTag(tag, cxx_type):
+    # TODO
+    search_scopes = []
+    return []
+
+def ExpandSearchScopesFromScope(scope):
+    '''
+    把一个作用域展开为所有可能搜索的作用域路径
+    eg. A::B::C -> ['A::B::C', 'A::B', 'A', '<global>']
+    '''
+    if not scope:
+        return []
+
+    if scope == '<global>':
+        return ['<global>']
+
+    result = ['<global>']
+    for idx, scope in enumerate(scope.split('::')):
+        if idx == 0:
+            result.insert(0, scope)
+        else:
+            result.insert(0, '%s::%s' % (result[0], scope))
+    return result
+
+'''
+= 类作用域中的名字查找 =
+(1) 首先, 在使用该名字的块中查找名字的声明. 只考虑在该项使用之前声明的名字
+(2) 如果找不到该名字, 则在包围的作用域中查找.
+
+    == 类成员声明的名字查找 ==
+    * 检查出现在名字使用之前的类成员的声明
+    * 如果第1步查找不成功, 则检查包含类定义的作用域中出现的声明以及出现在类定义
+      之前的声明.
+
+    == 类成员定义中的名字查找 ==
+    * 首先检查成员函数局部作用域中的声明
+    * 如果在成员函数中找不到该名字的声明, 则检查对所有类成员的声明
+    * 如果在类中找不到该名字的声明, 则检查在此成员函数定义之前的作用域中出现的声明
+'''
+
+def ResolveComplInfo(scope_stack, compl_info, tagmgr = None):
+    '''
+    解析补全请求
+        递归解析补全请求的补全 scope
+        返回用于获取 tags 的 search_scopes
+        NOTE: 不支持嵌套定义的模版类, 也不打算支持, 因诸多原因.
+        基本算法:
+        1) 预处理第一个非容器成员(变量, 函数), 使第一个成员变为容器
+        2) 处理 MemberStack 时, 第一个是变量或者函数或者经过类型替换后, 重头开始
+        3) 解析变量和函数的时候, 需要搜索变量和函数的 path 中的每段 scope
+        4) 每解析一次都要检查是否存在类型替换
+        5) 重复 2), 3), 4)
+
+    @return:    返回搜索作用域列表, 直接用于获取补全的tags'''
+    if not scope_stack or not compl_info.IsValid():
+        return []
+
+    if not compl_info.scopes and compl_info._global:
+        # 最简单的情况: ::|
+        return ['<global>']
+
+    scope_info = ResolveScopeStack(scope_stack)
+    # 逆序, 这个作为返回值, 一直修改
+    search_scopes = scope_info.function + scope_info.container + scope_info._global
+    compl_scopes = compl_info.scopes
+
+# ============================================================================
+# 需要先处理掉第一个scope是变量和函数的情况, 往后就好处理了
+# 都要展开名空间
+# ============================================================================
+    compl_scope = compl_scopes[0]
+    if compl_scope.kind == compl_scope.KIND_CONTAINER:
+        # 开始的时候的容器需要展开名空间信息
+        temp_name = ExpandUsingAndNSAlias(compl_scope.text)
+        if temp_name != compl_scope.text:
+            # 展开了 using, 需要重建 typeinfo
+            # eg.
+            # using A::B;
+            # B<C,D> b;
+            #
+            # Origin:   B<C,D>
+            # Reuslt:   A::B<C,D>
+            code = temp_name
+            if compl_scope.tmpl:
+                code += '< %s >' % ', '.join(compl_scope.tmpl)
+            cxx_type = CxxParseType(code)
+            # 更新
+            compl_scope.type = cxx_type
+    elif compl_scope.kind == compl_scope.KIND_VARIABLE and not compl_scope.cast:
+        if compl_scope.text == 'this':
+            # 'this' 变量是特殊的, 并且理论上只会出现在开始处
+            if len(scope_stack) < 2 and scope_stack[-2].kind != 'container':
+                # 上上个 scope 必须是容器, 否则就是语法错误
+                return []
+            search_name = scope_stack[-2].name
+            # TODO: 常规的情况下, 直接搜索, 通用情况下, 需要考虑作用域关系
+            search_scopes = scope_info._global # 暂时如此
+            tag = GetFirstMatchTag(tagmgr, search_scopes, search_name)
+            if not tag:
+                return []
+            #compl_scope.type = CxxParseType(tag['path'])
+            # TODO: this 的搜索范围仅限于它的类以及所有基类
+            #search_scopes = ExpandSearchScopesFromScope(tag['path'])
+            #search_scopes = ExpandClassScopes(tag['path'])
+            search_scopes = [tag['path']]
+            # 这里自己处理掉这个 scope
+            compl_scopes.pop(0)
+        else:
+            cxx_type = ResolveFirstVariable(tagmgr, scope_stack,
+                                            search_scopes, compl_scope.text)
+            tag = None
+            if not cxx_type.IsValid():
+                # 再尝试搜索 tag
+                tag = GetFirstMatchTag(tagmgr, search_scopes, compl_scope.text)
+                if not tag:
+                    return []
+
+            compl_scope.type = cxx_type
+            if tag:
+                search_scopes = ExpandSearchScopesFromScope(tag['scope'])
+
+            if len(cxx_type.typelist) > 1:
+                # 复合类型的变量, 需要解析, 因为这时的 cxx_type 可能无法搜索到 tag
+                # TODO
+                pass
+    elif compl_scope.kind == compl_scope.KIND_FUNCTION and not compl_scope.cast:
+        tag = GetFirstMatchTag(tagmgr, search_scopes, compl_scope.text)
+        if not tag:
+            return []
+        cxx_type = CxxParseType(tag.get('text', ''))
+        if not cxx_type.IsValid():
+            return []
+        # 更新
+        compl_scope.type = cxx_type
+        # 修正搜索范围
+        search_scopes = ExpandSearchScopesFromScope(tag['path'])
+    elif compl_scope.kind == compl_scope.KIND_UNKNOWN:
+        # 暂时不支持 KIND_UNKNOWN 的解析
+        return []
+# ----------------------------------------------------------------------------
+
+    # 每次解析变量的 TypeInfo 时, 应该添加此变量的作用域到此类型的搜索域
+    # eg.
+    # namespace A
+    # {
+    #     class B {
+    #     };
+    #
+    #     class C {
+    #         D d;
+    #     };
+    # }
+    # d 变量的 CxxType {'text': 'B', 'tmpl': []}
+    # 搜索变量 D 时需要添加 d 的 scope 的所有可能情况, A::C::d -> ['A::C', 'A']
+    # 即一个符号的上下文作用域
+
+    # 补全开始位置的搜索 scopes, 有时候需要使用
+    origin_search_scopes = search_scopes[:]
+
+    # 是否需要考虑 using 指令
+    expand_using = True
+
+    for idx, compl_scope in enumerate(compl_scopes):
+        # 每轮需要搜索的名字
+        search_name = compl_scope.text
+
+        if compl_scope.kind == compl_scope.KIND_UNKNOWN:
+            # 解析失败了
+            search_scopes = []
+            break
+        elif compl_scope.kind == compl_scope.KIND_CONTAINER:
+            pass
+        elif compl_scope.kind == compl_scope.KIND_VARIABLE:
+            name = compl_scope.text
+            if compl_scope.type:
+                name = compl_scope.type.fullname
+            elif compl_scope.cast:
+                name = compl_scope.cast.fullname
+            tag = GetFirstMatchTag(tagmgr, search_scopes, name)
+            if not tag:
+                search_scopes = []
+                break
+            if compl_scope.cast:
+                cxx_type = compl_scope.cast
+            else:
+                cxx_type = CxxParseType(tag.get('text', ''))
+            if not cxx_type.IsValid():
+                search_scopes = []
+                break
+            compl_scope.type = cxx_type
+            search_scopes = ExpandSearchScopesFromScope(tag['path'])
+            search_name = cxx_type.fullname
+        elif compl_scope.kind == compl_scope.KIND_FUNCTION:
+            tag = GetFirstMatchTag(tagmgr, search_scopes, compl_scope.text)
+            if not tag:
+                search_scopes = []
+                break
+            if compl_scope.cast:
+                cxx_type = compl_scope.cast
+            else:
+                cxx_type = CxxParseType(tag.get('text', ''))
+            if not cxx_type.IsValid():
+                search_scopes = []
+                break
+            compl_scope.type = cxx_type
+            search_scopes = ExpandSearchScopesFromScope(tag['scope'])
+            search_name = cxx_type.fullname
+        else:
+            pass
+        # endif
+
+        search_scopes = FilterDuplicate(search_scopes)
+
+        ### 之后就是根据上面解析出来的 CxxType 来更新搜索范围, 用于下一个的解析
+
+        # 根据已经获取到的 search_scopes 搜索目标 tag
+        tag = GetFirstMatchTag(tagmgr, search_scopes, search_name)
+        if not tag:
+            # 处理匿名容器, 因为匿名容器是不存在对应的 tag 的
+            # 所以如果有需要的时候, 手动构造匿名容器的 tag, 然后继续
+            # TODO: 貌似vlctags2没有这个问题了? 待确认
+            search_scopes = []
+            break
+
+        # TODO: 处理 tag 的 typedef
+
+        #compl_scope.tag = tag
+
+        # 好了, 已经获取到 tag 了, 现在需要解析 tag 生成 CxxType(typeinfo)
+        # TODO: 暂时这样处理, 往后再改
+        #compl_scope.type = CxxParseType(tag['path'])
+
+        search_scopes = [tag['path']]
+
+    return search_scopes
+
 def Error(msg):
     print msg
 
@@ -570,6 +1062,9 @@ def unit_test_GetComplInfo():
 
         # new
         "A::B *pa = new A::",
+
+        # last
+        "dynamic_cast<A<Z, Y, X> *>((O*)B.b())->C.",
     ]
     
     for origin in cases:
@@ -581,6 +1076,56 @@ def unit_test_GetComplInfo():
         compl_info = GetComplInfo(tokens)
         print compl_info
         #print json.dumps(eval(repr(compl_info)), sort_keys=True, indent=4)
+
+def GenPath(scope, name):
+    if scope == '<global>':
+        return name
+    return '%s::%s' % (scope, name)
+
+def TagIsCtor(tag):
+    '''判断是否构造函数的tag'''
+    if tag['parent'] == tag['name'] and tag['kind'] in ['f', 'p']:
+        return True
+    return False
+
+def TagIsDtor(tag):
+    '''判断是否析构函数的tag'''
+    if '~'+tag['parent'] == tag['name'] and tag['kind'] in ['f', 'p']:
+        return True
+    return False
+
+def GetFirstMatchTag(tagmgr, search_scopes, name, kinds = set()):
+    '''
+    @kinds: kind缩写的集合, 非空的时候, 只有tag的kind在此集合中才会不被忽略
+    '''
+    result = {}
+
+    for scope in search_scopes:
+        path = GenPath(scope, name)
+        tags = tagmgr.GetTagsByPath(path)
+        if not tags:
+            continue
+
+        if kinds:
+            found = False
+            for tag in tags:
+                if tag.kind in kinds:
+                    result = tag
+                    found = True
+                    break
+            if found:
+                break
+        else:
+            tag = tags[0]
+            if TagIsCtor(tag) or TagIsDtor(tag):
+                # 跳过构造和析构函数的 tag, 因为构造函数是不能继续补全的
+                # eg. A::A, A::~A
+                continue
+            else:
+                result = tag
+                break
+
+    return result
 
 def main(argv):
     unit_test_GetComplInfo()

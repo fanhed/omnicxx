@@ -63,6 +63,17 @@ class CxxType(object):
         # 是否强制为全局作用域，如 ::A::B
         self._global = False
 
+    @property
+    def fullname(self):
+        '''返回全名, 用于搜索 tags
+        A<X, Y>::B::C -> A::B::C
+        '''
+        names = [i.text for i in self.typelist]
+        if self._global:
+            return '::' + '::'.join(names)
+        else:
+            return '::'.join(names)
+
     def IsValid(self):
         return bool(self.typelist)
 
@@ -422,7 +433,17 @@ def CxxParseTemplateList(tokrdr):
 
     return result
 
-def CxxParseType(tokrdr):
+def CxxParseType(arg):
+    if isinstance(arg, TokensReader):
+        tokrdr = arg
+    elif isinstance(arg, str):
+        tokrdr = TokensReader(CxxTokenize(arg))
+    elif isinstance(arg, list):
+        tokrdr = TokensReader(arg)
+    else:
+        raise StandardError('Invalid argument')
+        
+
     cxx_type = CxxType()
 
 # ============================================================================
@@ -707,6 +728,9 @@ def main(argv):
     unit_test_float()
     unit_test_unittype()
     unit_test_type()
+
+    cxx_type = CxxParseType('A<X, Y>::B::C')
+    assert cxx_type.fullname == 'A::B::C'
 
 if __name__ == '__main__':
     import sys
