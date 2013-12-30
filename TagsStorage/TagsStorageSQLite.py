@@ -14,6 +14,8 @@ import subprocess
 import platform
 import sqlite3
 
+STORAGE_VERSION = 3000
+
 # 这两个变量暂时只对本模块生效
 # FIXME: 应该使用公共的模块定义这两个变量
 CPP_SOURCE_EXT = set(['c', 'cpp', 'cxx', 'c++', 'cc'])
@@ -37,54 +39,15 @@ def MakeQMarkString(count):
     else:
         return "(%s)" % ", ".join(["?" for i in range(count)])
 
-class TagsStorageSQLiteCache:
-    '''tags 缓存'''
-    def __init__(self):
-        # 以 sql 语句为键值
-        self.cache = {} # 字符串到标签条目列表的字典 {'fo': ['foo', 'foobar']}
-
-    def DoGet(self, key):
-        tags = []
-        if self.cache.has_key(key):
-            tags = self.cache[key][:]
-        return tags
-
-    def DoStore(self, key, tags):
-        '''以 sql 语句为键值保存 tags 的副本'''
-        self.cache[key] = tags[:]
-
-    def Get(self, sql, kinds = []):
-        if not kinds:
-            return self.DoGet(sql)
-        else:
-            key = sql
-            for kind in kinds:
-                key += "@" + kind
-            return self.DoGet(key)
-
-    def Store(self, sql, tags, kinds = []):
-        if not kinds:
-            return self.DoStore(sql, tags)
-        else:
-            key = sql
-            for kind in kinds:
-                # 不是原始的 sql 语句, 是简化过的
-                key += "@" + kind
-            return self.DoStore(key, tags)
-
-    def Clear(self):
-        self.cache.clear()
-
-tagsDatabaseVersion = 2000
+class PrintExcept(*args):
+    '''打印异常'''
+    pass
 
 class TagsStorageSQLite(ITagsStorage):
     def __init__(self):
         ITagsStorage.__init__(self)
+        self.fname = ''     # 数据库文件, os.path.realpath() 的返回值
         self.db = None      # sqlite3 的连接实例, 取此名字是为了与 codelite 统一
-        self.cache = None   # TagsStorageSQLiteCache 类的实例
-
-        # 测试时关闭缓存
-        self.SetUseCache(False)
 
     def __del__(self):
         if self.db:
@@ -92,84 +55,120 @@ class TagsStorageSQLite(ITagsStorage):
             self.db = None
 
     def GetVersion(self):
-        return tagsDatabaseVersion
+        global STORAGE_VERSION
+        return STORAGE_VERSION
 
-    def GetTagsBySql(self, sql):
+    def GetTagsBySQL(self, sql):
         '''外部/调试接口，返回元素为字典的列表'''
         if not sql:
             return []
         tags = self.DoFetchTags(sql)
-        if not tags:
-            return []
-        li = []
-        for tag in tags:
-            li.append(tag.ToDict())
-        return li
+        return [tag.ToDict() for tag in tags]
 
     def Begin(self):
         if self.db:
             try:
                 self.db.execute("begin;")
             except sqlite3.OperationalError:
-                pass
+                PrintExcept()
 
     def Commit(self):
         if self.db:
             try:
                 self.db.commit()
             except sqlite3.OperationalError:
-                pass
+                PrintExcept()
 
     def Rollback(self):
         if self.db:
             try:
                 self.db.rollback()
             except sqlite3.OperationalError:
-                pass
+                PrintExcept()
 
-    def OpenDatabase(self, fileName = ''):
+    def CloseDatabase(self):
+        if self.IsOpen():
+            self.db.close()
+            self.db = None
+
+    def OpenDatabase(self, fname):
+        '''正常返回0, 异常返回-1'''
         # TODO: 验证文件是否有效
 
         # 如果相同, 表示已经打开了相同的数据库, 直接返回
-        if self.fileName == os.path.abspath(fileName):
-            return True
+        if self.IsOpen() and self.fname == os.path.realpath(fname):
+            return 0
 
         # Did we get a file name to use?
         # 未打开任何数据库, 且请求打开的文件无效, 直接返回
-        if not self.fileName and not fileName:
-            return False
+        if not self.IsOpen() and not fname:
+            return -1
 
         # We did not get any file name to use BUT we
         # do have an open database, so we will use it
         # 传进来的是无效的文件, 但已经打开了某个数据库, 继续用之
-        if not fileName:
-            return True
+        if not fname:
+            return 0
 
-        absFileName = os.path.abspath(fileName)
-        if fileName == ':memory:':
-            # 允许连接内存数据库
-            absFileName = fileName
+        orig_fname = fname
+        if not fname == ':memory:' # ':memory:' 是一个特殊值, 表示内存数据库
+            fname = os.path.realpath(fname)
+
+        # 先把旧的关掉
+        self.CloseDatabase()
 
         try:
-            if not self.fileName:
-                # First time we open the db
-                # 没有打开着的数据库
-                self.db = sqlite3.connect(ToU(absFileName))
-                self.db.text_factory = str # 以字符串方式保存而不是 unicode
-                self.CreateSchema()
-                self.fileName = absFileName
-            else:
-                # We have both fileName & self.fileName and they
-                # are different, close previous db
-                # 已经打开了某个数据库, 请求打开另外的, 需要先关闭旧的
-                self.db.close()
-                self.db = sqlite3.connect(ToU(absFileName))
-                self.db.text_factory = str # 以字符串方式保存而不是 unicode
-                self.CreateSchema()
-                self.fileName = absFileName
-            return True
+            self.db = sqlite3.connect(ToU(fname))
+            self.db.text_factory = str # 以字符串方式保存而不是 unicode
+            self.CreateSchema()
+            self.fname = fname
+            return 0
         except sqlite3.OperationalError:
-            return False
+            PrintExcept()
+            return -1
+
+    def ExecuteSQL(self, sql):
+        '''NOTE: 不完全封装, 暂时不支持如果封装带占位符形式的参数, 懒得测试'''
+        if not sql or not self.IsOpen():
+            return -1
+        try:
+            self.db.execute(sql)
+        except sqlite3.OperationalError:
+            PrintExcept()
+            return -1
+        return 0
+
+    def ExecuteSQLScript(self, sql):
+        if not sql or not self.IsOpen():
+            return -1
+        try:
+            self.db.executescript(sql)
+        except sqlite3.OperationalError:
+            PrintExcept()
+            return -1
+        return 0
+
+    def DropSchema(self):
+        # TODO: 需要识别版本
+        version = self.GetSchemaVersion()
+        sqls = [
+            # and drop tables
+            "DROP TABLE IF EXISTS TAGS;",
+            "DROP TABLE IF EXISTS FILES;",
+            "DROP TABLE IF EXISTS TAGS_VERSION;",
+
+            # drop indexes
+            "DROP INDEX IF EXISTS FILES_UNIQ_IDX;",
+            "DROP INDEX IF EXISTS TAGS_UNIQ_IDX;",
+            "DROP INDEX IF EXISTS TAGS_KIND_IDX;",
+            "DROP INDEX IF EXISTS TAGS_FILE_IDX;",
+            "DROP INDEX IF EXISTS TAGS_NAME_IDX;",
+            "DROP INDEX IF EXISTS TAGS_SCOPE_IDX;",
+            "DROP INDEX IF EXISTS TAGS_VERSION_UNIQ_IDX;",
+        ]
+
+        for sql in sqls:
+            self.ExecuteSQL(sql)
 
     def CreateSchema(self):
         try:
@@ -177,147 +176,118 @@ class TagsStorageSQLite(ITagsStorage):
             # (this needs to be done before the creation of the
             # tables and indices)
             sql = "PRAGMA synchronous = OFF;"
-            self.db.execute(sql)
+            self.ExecuteSQL(sql)
 
             sql = "PRAGMA temp_store = MEMORY;"
-            self.db.execute(sql)
+            self.ExecuteSQL(sql)
 
-            sql = "CREATE TABLE IF NOT EXISTS TAGS "\
-                    "(ID INTEGER PRIMARY KEY AUTOINCREMENT, "\
-                    "name string, file string, line integer, text string, "\
-                    "access string, "\
-                    "inherits string, "\
-                    "kind string, "\
-                    "parent string, "\
-                    "parent_type string, "\
-                    "path string, "\
-                    "return string, "\
-                    "scope string, "\
-                    "signature string, "\
-                    "template string, "\
-                    "typeref string)"
-            self.db.execute(sql)
+            # TAGS 表
+            sql = '''
+            CREATE TABLE IF NOT EXISTS TAGS (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                name            STRING,
+                file            STRING,
+                fileid          INTEGER,
+                line            INTEGER,
+                kind            STRING,
+                scope           STRING,
+                parent_kind     STRING,
+                access          STRING,
+                inherits        STRING,
+                signature       STRING,
+                extra           STRING);
+            '''
 
-            sql = "CREATE TABLE IF NOT EXISTS FILES (ID INTEGER PRIMARY KEY "\
-                    "AUTOINCREMENT, file string, last_retagged integer);"
-            self.db.execute(sql)
+            self.ExecuteSQL(sql)
 
-            # create unuque index on Files' file column
-            sql = "CREATE UNIQUE INDEX IF NOT EXISTS FILES_NAME on FILES(file)"
-            self.db.execute(sql)
+            # FILES 表
+            sql = '''
+            CREATE TABLE IF NOT EXISTS FILES (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                file    STRING,
+                tagtime INTEGER);
+            '''
+            self.ExecuteSQL(sql)
 
-            # Create unique index on tags table
-            #sql = "CREATE UNIQUE INDEX IF NOT EXISTS TAGS_UNIQ on tags(kind, "\
-                    #"path, signature);"
-            # mod on 2011-01-07
-            # 不同源文件文件之间会存在相同的符号
-            sql = "CREATE UNIQUE INDEX IF NOT EXISTS TAGS_UNIQ on TAGS("\
-                    "file, line, kind, path, signature);"
-            self.db.execute(sql)
+            sqls = [
+                'CREATE UNIQUE INDEX IF NOT EXISTS FILES_UNIQ_IDX ON FILES(file);';
 
-            sql = "CREATE INDEX IF NOT EXISTS KIND_IDX on TAGS(kind);"
-            self.db.execute(sql)
+                # 唯一索引 mod on 2011-01-07
+                # 不同源文件文件之间会存在相同的符号
+                # 最靠谱是(name, file, line, kind, scope, signature)
+                # 但是可能会比较慢, 所以尽量精简
+                # 假定同一行不会存在相同名字和类型的符号
+                '''
+                CREATE UNIQUE INDEX IF NOT EXISTS TAGS_UNIQ_IDX ON TAGS(
+                    name, file, kind, scope, signature);
+                ''',
 
-            sql = "CREATE INDEX IF NOT EXISTS FILE_IDX on TAGS(file);"
-            self.db.execute(sql)
+                "CREATE INDEX IF NOT EXISTS TAGS_KIND_IDX ON TAGS(kind);",
+                "CREATE INDEX IF NOT EXISTS TAGS_FILE_IDX ON TAGS(file);",
+                "CREATE INDEX IF NOT EXISTS TAGS_NAME_IDX ON TAGS(name);",
+                "CREATE INDEX IF NOT EXISTS TAGS_SCOPE_IDX ON TAGS(scope);",
+                #"CREATE INDEX IF NOT EXISTS TAGS_PARENT_IDX ON TAGS(parent);",
 
-            # Create search indexes
-            sql = "CREATE INDEX IF NOT EXISTS TAGS_NAME on TAGS(name);"
-            self.db.execute(sql)
+                # TAGS_VERSION 表
+                "CREATE TABLE IF NOT EXISTS TAGS_VERSION (version INTEGER PRIMARY KEY);",
+                "CREATE UNIQUE INDEX IF NOT EXISTS TAGS_VERSION_UNIQ_IDX ON TAGS_VERSION(version);",
+            ]
 
-            sql = "CREATE INDEX IF NOT EXISTS TAGS_SCOPE on TAGS(scope);"
-            self.db.execute(sql)
+            for sql in sqls:
+                self.ExecuteSQL(sql)
 
-            sql = "CREATE INDEX IF NOT EXISTS TAGS_PATH on TAGS(path);"
-            self.db.execute(sql)
-
-            sql = "CREATE INDEX IF NOT EXISTS TAGS_PARENT on TAGS(parent);"
-            self.db.execute(sql)
-
-            sql = "CREATE TABLE IF NOT EXISTS TAGS_VERSION (version INTEGER "\
-                    "PRIMARY KEY);"
-            self.db.execute(sql)
-
-            sql = "CREATE UNIQUE INDEX IF NOT EXISTS TAGS_VERSION_UNIQ on "\
-                    "TAGS_VERSION(version);"
-            self.db.execute(sql)
-
+            # 插入数据
             self.db.execute("INSERT OR REPLACE INTO TAGS_VERSION VALUES(?)",
                             (self.GetVersion(), ))
 
             # 必须提交
             self.Commit()
         except sqlite3.OperationalError:
-            pass
+            PrintExcept()
 
     def RecreateDatabase(self):
-        if not self.fileName:
-            return
+        '''只有打开数据库的时候才能进行这个操作'''
+        if not self.IsOpen():
+            return -1
 
-        fileName = self.fileName
+        # 处理后事
+        self.Commit()
+        self.CloseDatabase()
 
+        # 内存数据库的话, 直接这样就行了
+        if self.fname == ':memory:':
+            return self.OpenDatabase(self.fname)
+
+        # 存在关联文件的数据库, 优先使用删除文件再创建的形式, 如果失败, 
+        # 重新打开并重建 schema
         try:
-            # commit any open transactions
-            self.Commit()
-
-            # Close the database
-            if self.db:
-                self.db.close()
-
-            try:
-                if self.fileName != ':memory:':
-                    try:
-                        os.remove(fileName)
-                    except WindowsError:
-                        print "WindowsError: remove %s failed" % fileName
-                        pass
-                else:
-                    raise sqlite3.OperationalError
-            except:
-                # re-open the database
-                self.fileName = ''
-                self.OpenDatabase(fileName)
-
-                # and drop tables
-                self.db.execute("DROP TABLE IF EXISTS TAGS")
-                self.db.execute("DROP TABLE IF EXISTS TAGS_VERSION")
-                self.db.execute("DROP TABLE IF EXISTS FILES")
-
-                # drop indexes
-                self.db.execute("DROP INDEX IF EXISTS FILES_NAME")
-                self.db.execute("DROP INDEX IF EXISTS TAGS_UNIQ")
-                self.db.execute("DROP INDEX IF EXISTS KIND_IDX")
-                self.db.execute("DROP INDEX IF EXISTS FILE_IDX")
-                self.db.execute("DROP INDEX IF EXISTS TAGS_NAME")
-                self.db.execute("DROP INDEX IF EXISTS TAGS_SCOPE")
-                self.db.execute("DROP INDEX IF EXISTS TAGS_PATH")
-                self.db.execute("DROP INDEX IF EXISTS TAGS_PARENT")
-                self.db.execute("DROP INDEX IF EXISTS TAGS_VERSION_UNIQ")
-
-                # Recreate the schema
-                self.CreateSchema()
-            else:
-                # We managed to delete the file
-                # re-open it
-                self.fileName = ''
-                self.OpenDatabase(fileName)
-        except sqlite3.OperationalError:
-            pass
+            os.remove(self.fname)
+        except:
+            PrintExcept("Failed to remove %s" % self.fname)
+            # Reopen the database
+            self.OpenDatabase(self.fname)
+            # Drop the schema
+            self.DropSchema()
+            # Create the schema
+            self.CreateSchema()
+        else:
+            # 正常情况下, 再打开这个文件作为数据库即可
+            self.OpenDatabase(self.fname)
 
     def GetSchemaVersion(self):
+        version = 0
         try:
-            version = ''
-            sql = "SELECT * FROM TAGS_VERSION"
+            sql = "SELECT * FROM TAGS_VERSION;"
             for row in self.db.execute(sql):
-                version = row[0]
-            return version
+                version = int(row[0])
+                break
         except sqlite3.OperationalError:
             pass
-        return ''
+        return version
 
-    def Store(self, tagTree, dbFile = '', autoCommit = True, indicator = None):
+    def Store(self, tagTree, dbFile = '', auto_commit = True, indicator = None):
         '''需要 tagTree
-        
+
         tagTree 为标签的 path 树'''
         ret = False
 
@@ -326,7 +296,7 @@ class TagsStorageSQLite(ITagsStorage):
             # 直接从字符串保存
             tags = tagTree
 
-            if not dbFile and not self.fileName:
+            if not dbFile and not self.fname:
                 return False
 
             if not tags:
@@ -336,7 +306,7 @@ class TagsStorageSQLite(ITagsStorage):
             try:
                 updateList = [] # 不存在的直接插入, 存在的需要更新
 
-                if autoCommit:
+                if auto_commit:
                     self.Begin()
                     #self.db.execute('begin;')
 
@@ -357,25 +327,25 @@ class TagsStorageSQLite(ITagsStorage):
                         # InsertTagEntry() 貌似是不会失败的?!
                         updateList.append(tagEntry)
 
-                if autoCommit:
+                if auto_commit:
                     self.Commit()
 
                 # Do we need to update?
                 if updateList:
-                    if autoCommit:
+                    if auto_commit:
                         self.Begin()
                         #self.db.execute('begin;')
 
                     for i in updateList:
                         self.UpdateTagEntry(i)
 
-                    if autoCommit:
+                    if auto_commit:
                         self.Commit()
                 ret = True
             except sqlite3.OperationalError:
                 ret = False
                 try:
-                    if autoCommit:
+                    if auto_commit:
                         self.db.rollback()
                 except sqlite3.OperationalError:
                     pass
@@ -383,11 +353,11 @@ class TagsStorageSQLite(ITagsStorage):
             pass
         return ret
 
-    def StoreFromTagFile(self, tagFile, dbFile = '', autoCommit = True):
+    def StoreFromTagFile(self, tagFile, dbFile = '', auto_commit = True):
         '''从 tags 文件保存'''
         ret = False
 
-        if not dbFile and not self.fileName:
+        if not dbFile and not self.fname:
             return False
 
         if not tagFile:
@@ -397,7 +367,7 @@ class TagsStorageSQLite(ITagsStorage):
         try:
             updateList = [] # 不存在的直接插入, 存在的需要更新
 
-            if autoCommit:
+            if auto_commit:
                 self.Begin()
 
             try:
@@ -434,18 +404,18 @@ class TagsStorageSQLite(ITagsStorage):
                 #    if not self.InsertTagEntry(tagEntryDup):
                 #        updateList.append(tagEntryDup)
 
-            if autoCommit:
+            if auto_commit:
                 self.Commit()
 
             # Do we need to update?
             if updateList:
-                if autoCommit:
+                if auto_commit:
                     self.Begin()
 
                 for i in updateList:
                     self.UpdateTagEntry(i)
 
-                if autoCommit:
+                if auto_commit:
                     self.Commit()
 
             f.close()
@@ -453,7 +423,7 @@ class TagsStorageSQLite(ITagsStorage):
         except sqlite3.OperationalError:
             ret = False
             try:
-                if autoCommit:
+                if auto_commit:
                     self.db.rollback()
             except sqlite3.OperationalError:
                 pass
@@ -464,70 +434,70 @@ class TagsStorageSQLite(ITagsStorage):
         '''取出属于 file 文件的全部标签'''
         # Incase empty dbFile is provided, use the current file name
         if not dbFile:
-            dbFile = self.fileName
+            dbFile = self.fname
         self.OpenDatabase(dbFile)
 
         sql = "select * from tags where file='" + file + "' "
         return self.DoFetchTags(sql)
 
-    def DeleteByFileName(self, dbFile, fileName, autoCommit = True):
+    def DeleteByFileName(self, dbFile, fname, auto_commit = True):
         # [DEPRECATE]
-        '''删除属于指定文件名 fileName 的所有标签'''
+        '''删除属于指定文件名 fname 的所有标签'''
         # make sure database is open
         try:
             self.OpenDatabase(dbFile)
-            if autoCommit:
+            if auto_commit:
                 self.Begin()
                 #self.db.execute('begin;')
 
-            self.db.execute("DELETE FROM TAGS WHERE file=?", (fileName, ))
+            self.db.execute("DELETE FROM TAGS WHERE file=?", (fname, ))
 
-            if autoCommit:
+            if auto_commit:
                 self.Commit()
         except:
-            if autoCommit:
+            if auto_commit:
                 self.db.rollback()
 
-    def DeleteTagsByFiles(self, files, dbFile = '', autoCommit = True):
-        '''删除属于指定文件名 fileName 的所有标签'''
+    def DeleteTagsByFiles(self, files, dbFile = '', auto_commit = True):
+        '''删除属于指定文件名 fname 的所有标签'''
         ret = False
         # make sure database is open
         self.OpenDatabase(dbFile)
         try:
-            if autoCommit:
+            if auto_commit:
                 self.Begin()
 
             self.db.execute(
                 "DELETE FROM tags WHERE file IN('%s')" % "', '".join(files))
 
-            if autoCommit:
+            if auto_commit:
                 self.Commit()
             ret = True
         except sqlite3.OperationalError:
             ret = False
-            if autoCommit:
+            if auto_commit:
                 self.db.rollback()
         return ret
 
-    def UpdateTagsFileColumnByFile(self, newFile, oldFile, autoCommit = True):
+    def UpdateTagsFileColumnByFile(self, newFile, oldFile, auto_commit = True):
         ret = False
         try:
-            if autoCommit:
+            if auto_commit:
                 self.Begin()
             self.db.execute("UPDATE TAGS set file=? WHERE file=?",
                             (newFile, oldFile))
-            if autoCommit:
+            if auto_commit:
                 self.Commit()
             ret = True
         except:
             ret = False
-            if autoCommit:
+            if auto_commit:
                 self.Rollback()
         return ret
 
     def Query(self, sql, dbFile = ''):
         '''Execute a query sql and return result set.
-        
+
         这个函数特别之处在于自动 OpenDatabase()'''
         try:
             self.OpenDatabase(dbFile)
@@ -576,10 +546,10 @@ class TagsStorageSQLite(ITagsStorage):
                     fe.SetFile(row[1])
                     fe.SetLastRetaggedTimestamp(row[2])
 
-                    fileName = fe.GetFile()
-                    match = os.path.basename(fileName)
+                    fname = fe.GetFile()
+                    match = os.path.basename(fname)
                     if matchPath:
-                        match = fileName
+                        match = fname
 
                     # TODO: windows 下文件名全部保存为小写
 
@@ -660,27 +630,30 @@ class TagsStorageSQLite(ITagsStorage):
         pass
 
     def FromSQLite3ResultSet(self, row):
-        '''从数据库的一行数据中提取标签对象'''
+        '''从数据库的一行数据中提取标签对象
+| id | name | file | fileid | line | kind | scope | parent_kind | access | inherits | signature | extra |
+|----|------|------|--------|------|------|-------|-------------|--------|----------|-----------|-------|
+|    |      |      |        |      |      |       |             |        |          |           |       |
+'''
         entry = TagEntry()
-        entry.SetId         (row[0])
-        entry.SetName       (row[1])
-        entry.SetFile       (row[2])
-        entry.SetLine       (row[3])
-        entry.SetText       (row[4])
+        entry.id          = (row[0])
+        entry.name        = (row[1])
+        entry.file        = (row[2])
+        entry.fileid      = int((row[3]))
+        entry.line        = int((row[4]))
 
-        entry.SetAccess     (row[5])
-        entry.SetInherits   (row[6])
-        entry.SetKind       (row[7])
-        entry.SetParent     (row[8])
-        entry.SetParentType (row[9])
-        entry.SetPath       (row[10])
-        entry.SetReturn     (row[11])
-        entry.SetScope      (row[12])
-        entry.SetSignature  (row[13])
-        entry.SetTemplate   (row[14])
-        entry.SetTyperef    (row[15])
+        entry.kind        = (row[5])
+        entry.scope       = (row[6])
+        entry.parent_kind = (row[7])
+        entry.access      = (row[8])
+        entry.inherits    = (row[9])
+        entry.signature   = (row[10])
+        entry.extra       = (row[11])
 
         return entry
+
+    def _FetchTags(self, sql):
+        pass
 
     def DoFetchTags(self, sql, kinds = []):
         '''从数据库中取出 tags'''
@@ -879,11 +852,11 @@ class TagsStorageSQLite(ITagsStorage):
         sql = "select * from tags where scope='" + scope + "'"
         return self.DoFetchTags(sql, kinds)
 
-    def GetTagsByKindsAndFile(self, kinds, fileName, orderingColumn, order):
+    def GetTagsByKindsAndFile(self, kinds, fname, orderingColumn, order):
         if not kinds:
             return []
 
-        sql = "select * from tags where file='" + fileName + "' and kind in ("
+        sql = "select * from tags where file='" + fname + "' and kind in ("
         for i in kinds:
             sql += "'" + i + "',"
         sql = sql[:-1] + ")"
@@ -899,49 +872,48 @@ class TagsStorageSQLite(ITagsStorage):
 
         return self.DoFetchTags(sql)
 
-    def DeleteFileEntry(self, fileName):
+    def DeleteFileEntry(self, fname):
         try:
-            self.db.execute("DELETE FROM FILES WHERE file=?", (fileName,))
+            self.db.execute("DELETE FROM FILES WHERE file=?;", (fname, ))
             self.Commit()
-        except:
-            # TODO: 区分错误代码
-            return False
+        except sqlite3.OperationalError:
+            return -1
         else:
-            return True
+            return 0
 
     def DeleteFileEntries(self, files):
         try:
-            self.db.execute("DELETE FROM FILES WHERE file IN %s" 
+            self.db.execute("DELETE FROM FILES WHERE file IN %s;" 
                             % MakeQMarkString(len(files)), tuple(files))
             self.Commit()
         except sqlite3.OperationalError:
-            return False
+            return -1
         else:
-            return True
+            return 0
 
-    def InsertFileEntry(self, fileName, timestamp, autoCommit = True):
+    def InsertFileEntry(self, fname, tagtime, auto_commit = True):
         try:
             # 理论上, 不会插入失败
-            self.db.execute("INSERT OR REPLACE INTO FILES VALUES(NULL, ?, ?)", 
-                           (fileName, timestamp))
-            if autoCommit:
+            self.db.execute("INSERT OR REPLACE INTO FILES VALUES(NULL, ?, ?);", 
+                           (fname, tagtime))
+            if auto_commit:
                 self.Commit()
         except:
-            return False
+            return -1
         else:
-            return True
+            return 0
 
-    def UpdateFileEntry(self, fileName, timestamp, autoCommit = True):
+    def UpdateFileEntry(self, fname, tagtime, auto_commit = True):
         try:
             self.db.execute(
-                "UPDATE OR REPLACE FILES SET last_retagged=? WHERE file=?", 
-                (timestamp, fileName))
-            if autoCommit:
+                "UPDATE OR REPLACE FILES SET tagtime=? WHERE file=?;", 
+                (tagtime, fname))
+            if auto_commit:
                 self.Commit()
         except:
-            return False
+            return -1
         else:
-            return True
+            return 0
 
     def DeleteTagEntry(self, kind, signature, path):
         try:
@@ -1036,7 +1008,7 @@ class TagsStorageSQLite(ITagsStorage):
     def IsTypeAndScopeContainer(self, typeName, scope):
         '''返回有三个元素的元组 (Ture/False, typeName, scope)
         True if type exist under a given scope.
-        
+
         Incase it exist but under the <global> scope, 'scope' will be changed
         '''
         # Break the typename to 'name' and scope
@@ -1143,9 +1115,9 @@ class TagsStorageSQLite(ITagsStorage):
 
         return False
 
-    def GetScopesFromFileAsc(self, fileName, scopes):
+    def GetScopesFromFileAsc(self, fname, scopes):
         '''传入的 scopes 为列表'''
-        sql = "select * from tags where file = '" + fileName + "' " \
+        sql = "select * from tags where file = '" + fname + "' " \
                 + " and kind in('prototype', 'function', 'enum')" \
                 + " order by scope ASC"
 
@@ -1157,8 +1129,8 @@ class TagsStorageSQLite(ITagsStorage):
         except:
             pass
 
-    def GetTagsByFileScopeAndKinds(self, fileName, scopeName, kinds):
-        sql = "select * from tags where file = '" + fileName + "' " \
+    def GetTagsByFileScopeAndKinds(self, fname, scopeName, kinds):
+        sql = "select * from tags where file = '" + fname + "' " \
                 + " and scope='" + scopeName + "' "
 
         if kinds:
@@ -1363,15 +1335,15 @@ def AppendCtagsOpt(opt):
     CTAGS_OPTS += ' ' + opt
     CTAGS_OPTS_LIST += [opt]
 
-def IsCppSourceFile(fileName):
-    ext = os.path.splitext(fileName)[1][1:]
+def IsCppSourceFile(fname):
+    ext = os.path.splitext(fname)[1][1:]
     if ext in CPP_SOURCE_EXT:
         return True
     else:
         return False
 
-def IsCppHeaderFile(fileName):
-    ext = os.path.splitext(fileName)[1][1:]
+def IsCppHeaderFile(fname):
+    ext = os.path.splitext(fname)[1][1:]
     if ext in CPP_HEADER_EXT:
         return True
     else:
@@ -1506,8 +1478,8 @@ def CppTagsDbParseFilesAndStore(dbFile, files, macrosFiles = []):
 
     return ret
 
-def ParseFile(fileName, macrosFiles = []):
-    return ParseFiles([fileName], macrosFiles)
+def ParseFile(fname, macrosFiles = []):
+    return ParseFiles([fname], macrosFiles)
 
 def ParseFilesAndStore(storage, files, macrosFiles = [], filterNotNeed = True, 
                        indicator = None, useCppTagsDb = False,
@@ -1565,7 +1537,7 @@ def ParseFilesAndStore(storage, files, macrosFiles = [], filterNotNeed = True,
 
     if useCppTagsDb:
         # 先删除全部需要更新的
-        if not storage.DeleteTagsByFiles(batchFiles, autoCommit = True):
+        if not storage.DeleteTagsByFiles(batchFiles, auto_commit = True):
             print 'storage.DeleteTagsByFiles() failed'
 
     # 这个时间取尽量早的时间，理论上使用文件的修改时间戳比较好
@@ -1584,25 +1556,25 @@ def ParseFilesAndStore(storage, files, macrosFiles = [], filterNotNeed = True,
             if parseRet: # 只有解析成功才入库
                 storage.Begin()
                 if not storage.DeleteTagsByFiles(batchFiles,
-                                                 autoCommit = False):
+                                                 auto_commit = False):
                     storage.Rollback()
                     storage.Begin()
-                if not storage.StoreFromTagFile(tagFile, autoCommit = False):
+                if not storage.StoreFromTagFile(tagFile, auto_commit = False):
                     storage.Rollback()
                     storage.Begin()
                 timestamp = int(time.time())
                 for f in batchFiles:
                     if os.path.isfile(f):
                         storage.InsertFileEntry(f, timestamp,
-                                                autoCommit = False)
+                                                auto_commit = False)
                 storage.Commit()
         #else:
             #tags = ParseFiles(batchFiles, macrosFiles)
             #storage.Begin()
-            #if not storage.DeleteTagsByFiles(batchFiles, autoCommit = False):
+            #if not storage.DeleteTagsByFiles(batchFiles, auto_commit = False):
                 #storage.Rollback()
                 #storage.Begin()
-            #if not storage.Store(tags, autoCommit = False, indicator = None):
+            #if not storage.Store(tags, auto_commit = False, indicator = None):
                 #storage.Rollback()
                 #storage.Begin()
             #storage.Commit()
