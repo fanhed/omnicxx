@@ -6,7 +6,7 @@ OmniCxx plugin for Videm
 支持
 * 名空间, using, 名空间别名
 * 类型定义
-* 模板
+* 有限的模板支持
 * 继承, 多重继承
 * GNU STL
 
