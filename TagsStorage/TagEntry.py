@@ -149,7 +149,6 @@ class TagEntry():
 
         extra = ''
 
-        # TODO: 分析 text 填充 extra
         if kind == 'typedef':
             extra = re.sub(r'typedef\s+|\s+[a-zA-Z_]\w*\s*;\s*$', '', text)
         elif kind == 'struct' or kind == 'class':
@@ -166,29 +165,18 @@ class TagEntry():
             if m:
                 extra = re.sub(r'\s*[a-zA-Z_]\w*$', '', m.group(1).strip())
         elif kind == 'variable' or kind == 'externvar':
+            # TODO: 数组形式未能解决, 很复杂, 暂时无法完善处理, 全部存起来
             if exts.has_key('typeref'):
-                # TODO: 数组形式未能解决
                 # 从这个域解析
                 # typeref:struct:ss    } ***p, *x;
                 extra = exts['typeref'].partition(':')[2]
-                try:
-                    tmp = ',' + re.sub(r'^\s*}\s*', '', text)
-                    m = re.search(r',([^,]*)\s*\b%s\b' % name, tmp)
-                    if m:
-                        extra += ' %s' % m.group(1)
-                        extra = extra.strip()
-                except:
-                    extra = '<error>'
-                re.search()
+                extra += re.sub(r'^\s*}\s*', '', text)
             else:
-                # TODO: 数组形式未能解决
-                # 从 text 解析
-                # const A<B>::C * const p, &&x;
-                tmp = re.sub(r'[,;].*$', '', text) # const A<B>::C * const p
-                # 不准确, 暂时作为参考用着
-                extra = re.sub(r'[a-zA-Z_]\w*\s*$', '', tmp)
+                extra = text
         else:
             pass
+
+        self.extra = extra
 
         # Check if we can get full name (including path)
         # 添加 parent_kind 属性, 以保证不丢失信息
