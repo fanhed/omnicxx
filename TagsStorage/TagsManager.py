@@ -20,13 +20,15 @@ def TagEntry2Tag(tagEntry):
     # 即使替换成 vim 的双单引号转义, 最终显示的是 "\'\'", 无解!
     # 暂时只能替换为空格(可以约定一个特殊字符然后替换?)
     #tag['cmd'] = tagEntry.GetPattern().replace("'", " ")
-    tag['cmd'] = tagEntry.GetText() # 这个域暂时用 'text' 域填充
+    #tag['cmd'] = tagEntry.GetText() # 这个域暂时用 'text' 域填充
+    tag['cmd'] = ''
     # 全称改为简称, 用命令参数控制
     tag['kind'] = tagEntry.GetAbbrKind()
     tag['static'] = 0 # 作用不明
 
     # 必不可少的附加域
-    tag['text'] = tagEntry.GetText()
+    #tag['text'] = tagEntry.GetText()
+    tag['extra'] = tagEntry.GetExtra()
     tag['line'] = tagEntry.GetLine() # 行号, 用于定位
     tag['parent'] = tagEntry.GetParent() # 父亲的名字, 不带路径
     tag['path'] = tagEntry.GetPath()
@@ -41,12 +43,12 @@ def TagEntry2Tag(tagEntry):
         tag['signature'] = tagEntry.GetSignature()
     if tagEntry.GetTyperef():
         tag['typeref'] = tagEntry.GetTyperef()
-    if tagEntry.GetParentType():
-        tag[tagEntry.GetParentType()] = tagEntry.GetScope()
-    if tagEntry.GetTemplate():
-        tag['template'] = tagEntry.GetTemplate()
-    if tagEntry.GetReturn():
-        tag['return'] = tagEntry.GetReturn()
+    if tagEntry.GetParentKind():
+        tag[tagEntry.GetParentKind()] = tagEntry.GetScope()
+    #if tagEntry.GetTemplate():
+        #tag['template'] = tagEntry.GetTemplate()
+    #if tagEntry.GetReturn():
+        #tag['return'] = tagEntry.GetReturn()
 
     return tag
 
@@ -96,7 +98,8 @@ class ParseFilesThread(threading.Thread):
             del storage
         except:
             # FIXME: gvim里面这样打印就会导致gvim崩溃了
-            print 'ParseFilesThread() failed'
+            #print 'ParseFilesThread() failed'
+            pass
 
         ParseFilesThread.lock.release()
 
@@ -206,17 +209,17 @@ class TagsManager(object):
 
     def GetTagsByScopeAndName(self, scope, name):
         tagEntries = self.storage.GetTagsByScopeAndName(scope, name, True)
-        return TagEntries2Tags(tagEntries)
+        return tagEntries
 
     def GetTagsByScopesAndName(self, scopes, name, partialMatch = True):
         tagEntries = self.storage.GetTagsByScopeAndName(
             scopes, name, partialMatch)
-        return TagEntries2Tags(tagEntries)
+        return tagEntries
 
     def GetOrderedTagsByScopesAndName(self, scopes, name, partialMatch = True):
         tagEntries = self.storage.GetOrderedTagsByScopesAndName(
             scopes, name, partialMatch)
-        return TagEntries2Tags(tagEntries)
+        return tagEntries
 
     def GetTagsByScopeAndKind(self, scope, kind):
         return self.GetTagsByScopesAndKinds([scope], [kind])
@@ -224,15 +227,15 @@ class TagsManager(object):
     def GetTagsByScopesAndKinds(self, scopes, kinds):
         tagEntries = self.storage.GetTagsByScopesAndKinds(scopes, 
                                                           ToFullKinds(kinds))
-        return TagEntries2Tags(tagEntries)
+        return tagEntries
 
     def GetTagsByPath(self, path):
         tagEntries = self.storage.GetTagsByPath(path)
-        return TagEntries2Tags(tagEntries)
+        return tagEntries
 
     def GetTagsByKindAndPath(self, kind, path):
         tagEntries = self.storage.GetTagsByKindAndPath(ToFullKind(kind), path)
-        return TagEntries2Tags(tagEntries)
+        return tagEntries
 
 
 def test():

@@ -296,24 +296,35 @@ class TagEntry():
     def IsValid(self):
         return self.kind != 'unknown'
 
+    @property
+    def parent(self):
+        return self.scope.split('::')[-1]
+
+    @property
+    def path(self):
+        return GenPath(self.scope, self.name)
+
+    def GetExtra(self):
+        return self.extra
+
     def IsContainer(self):
-        kind = self.GetKind()
-        return kind == 'class' \
-                or kind == 'struct' \
-                or kind == 'union' \
-                or kind == 'namespace'
+        return self.GetAbbrKind() in set(['c', 's', 'u', 'n'])
+
+    def IsCtor(self):
+        '''构造函数'''
+        return self.GetAbbrKind() in set(['f', 'p']) and self.parent == self.name
 
     def IsConstructor(self):
-        if self.GetKind() != 'function' and self.GetKind() != 'prototype':
-            return False
-        else:
-            return self.GetName() == self.GetScope()
+        '''构造函数'''
+        return self.IsCtor()
+
+    def IsDtor(self):
+        '''析构函数'''
+        return self.GetAbbrKind() in set(['f', 'p']) and self.name.startswith('~')
 
     def IsDestructor(self):
-        if self.GetKind() != 'function' and self.GetKind() != 'prototype':
-            return False
-        else:
-            return self.GetName().startswith('~')
+        '''析构函数'''
+        return self.IsDtor()
 
     def IsMethod(self):
         '''Return true of the this tag is a function or prototype'''
